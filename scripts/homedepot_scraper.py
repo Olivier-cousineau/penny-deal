@@ -36,10 +36,19 @@ def scrape_deals(url: str, user_agent: str | None = None, proxy: str | None = No
     ua = user_agent or (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "Chrome/122.0.0.0 Safari/537.36"
     )
     with sync_playwright() as playwright:
-        launch_args: dict[str, object] = {"headless": True}
+        launch_args: dict[str, object] = {
+            "headless": True,
+            "args": [
+                "--disable-http2",
+                "--disable-web-security",
+                "--disable-features=VizDisplayCompositor",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+            ],
+        }
         if proxy:
             launch_args["proxy"] = {"server": proxy}
         browser = playwright.chromium.launch(**launch_args)
@@ -47,10 +56,25 @@ def scrape_deals(url: str, user_agent: str | None = None, proxy: str | None = No
         context = browser.new_context(
             user_agent=ua,
             viewport={"width": 1920, "height": 1080},
+            extra_http_headers={
+                "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="122", "Google Chrome";v="122"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-site": "none",
+                "accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "image/avif,image/webp,*/*;q=0.8"
+                ),
+                "accept-language": "fr-CA,fr;q=0.9,en;q=0.8",
+            },
         )
         page = context.new_page()
-        page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_timeout(5000)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(8000)
+        page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(3000)
 
         cards = page.locator("[data-testid='product-grid'] [data-testid='product-card']")
         card_count = cards.count()
