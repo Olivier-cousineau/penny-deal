@@ -8,7 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from playwright.sync_api import sync_playwright
+import csv
+
+import httpx
+from parsel import Selector
 
 BASE_URL = "https://www.homedepot.ca"
 CLEARANCE_URL = "https://www.homedepot.ca/en/home/categories/all/collections/clearance.html"
@@ -38,64 +41,43 @@ def scrape_deals(url: str, user_agent: str | None = None, proxy: str | None = No
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/122.0.0.0 Safari/537.36"
     )
-    with sync_playwright() as playwright:
-        launch_args: dict[str, object] = {
-            "headless": True,
-            "args": [
-                "--disable-http2",
-                "--disable-web-security",
-                "--disable-features=VizDisplayCompositor",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-            ],
-        }
-        if proxy:
-            launch_args["proxy"] = {"server": proxy}
-        browser = playwright.chromium.launch(**launch_args)
+    headers = {
+        "user-agent": ua,
+        "accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "accept-language": "fr-CA,fr;q=0.9,en;q=0.8",
+    }
+    proxies = None
+    if proxy:
+        proxies = {"http://": proxy, "https://": proxy}
+    with httpx.Client(headers=headers, proxies=proxies, follow_redirects=True, timeout=30.0) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        selector = Selector(response.text)
 
-        context = browser.new_context(
-            user_agent=ua,
-            viewport={"width": 1920, "height": 1080},
-            extra_http_headers={
-                "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="122", "Google Chrome";v="122"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-                "sec-fetch-dest": "document",
-                "sec-fetch-mode": "navigate",
-                "sec-fetch-site": "none",
-                "accept": (
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                    "image/avif,image/webp,*/*;q=0.8"
-                ),
-                "accept-language": "fr-CA,fr;q=0.9,en;q=0.8",
-            },
+    cards = selector.css("[data-testid='product-grid'] [data-testid='product-card']")
+    scraped_at = datetime.now(timezone.utc).isoformat()
+    for card in cards:
+        title = " ".join(card.css("[data-testid='product-card-title']::text").getall()).strip()
+        price_text = " ".join(card.css("[data-testid='product-card-price']::text").getall()).strip()
+        discount = " ".join(card.css("[data-testid='product-card-badge']::text").getall()).strip()
+        if not discount:
+            discount = " ".join(card.css("[data-testid='product-card-discount']::text").getall()).strip()
+        url_path = card.css("a::attr(href)").get()
+        if not url_path:
+            continue
+        full_url = url_path if url_path.startswith("http") else f"{BASE_URL}{url_path}"
+        results.append(
+            {
+                "title": title,
+                "price": price_text,
+                "discount": discount,
+                "url": full_url,
+                "scraped_at": scraped_at,
+            }
         )
-        page = context.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(8000)
-        page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(3000)
-
-        cards = page.locator("[data-testid='product-grid'] [data-testid='product-card']")
-        card_count = cards.count()
-        for idx in range(card_count):
-            card = cards.nth(idx)
-            title = card.locator("[data-testid='product-card-title']").inner_text().strip()
-            price_text = card.locator("[data-testid='product-card-price']").inner_text().strip()
-            url_path = card.locator("a").first.get_attribute("href")
-            if not url_path:
-                continue
-            full_url = url_path if url_path.startswith("http") else f"{BASE_URL}{url_path}"
-            results.append(
-                {
-                    "title": title,
-                    "price": price_text,
-                    "url": full_url,
-                }
-            )
-
-        context.close()
-        browser.close()
 
     return results
 
@@ -128,6 +110,7 @@ def main() -> None:
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path = output_path.with_suffix(".csv")
 
     payload = {
         "scraped_at": datetime.now(timezone.utc).isoformat(),
@@ -139,7 +122,14 @@ def main() -> None:
     }
 
     output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-    print(f"Saved {len(results)} deals ({len(penny_deals)} penny deals) to {output_path}")
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["title", "price", "discount", "url", "scraped_at"])
+        writer.writeheader()
+        writer.writerows(results)
+
+    print(
+        f"Saved {len(results)} deals ({len(penny_deals)} penny deals) to {output_path} and {csv_path}"
+    )
 
 
 if __name__ == "__main__":
