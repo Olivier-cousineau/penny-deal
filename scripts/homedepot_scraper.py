@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import inspect
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -49,10 +50,19 @@ def scrape_deals(url: str, user_agent: str | None = None, proxy: str | None = No
         ),
         "accept-language": "fr-CA,fr;q=0.9,en;q=0.8",
     }
-    proxies = None
+    client_kwargs: dict[str, object] = {
+        "headers": headers,
+        "follow_redirects": True,
+        "timeout": 30.0,
+    }
     if proxy:
-        proxies = {"http://": proxy, "https://": proxy}
-    with httpx.Client(headers=headers, proxies=proxies, follow_redirects=True, timeout=30.0) as client:
+        proxy_config = {"http://": proxy, "https://": proxy}
+        client_signature = inspect.signature(httpx.Client)
+        if "proxies" in client_signature.parameters:
+            client_kwargs["proxies"] = proxy_config
+        elif "proxy" in client_signature.parameters:
+            client_kwargs["proxy"] = proxy
+    with httpx.Client(**client_kwargs) as client:
         response = client.get(url)
         response.raise_for_status()
         selector = Selector(response.text)
