@@ -10,7 +10,8 @@ from typing import Iterable
 
 from playwright.sync_api import sync_playwright
 
-BASE_URL = "https://www.homedepot.ca/en/home/collection/clearance-centre/"
+BASE_URL = "https://www.homedepot.ca"
+CLEARANCE_URL = "https://www.homedepot.ca/en/home/categories/all/collections/clearance.html"
 OUTPUT_PATH = Path("data/homedepot/liquidations.json")
 
 
@@ -24,27 +25,32 @@ def normalize_price(raw_price: str) -> float | None:
         return None
 
 
-def build_source_url(store_id: str | None) -> str:
+def build_url(store_id: str | None) -> str:
     if store_id:
-        return f"{BASE_URL}?store={store_id}"
-    return BASE_URL
+        return f"{CLEARANCE_URL}?store={store_id}"
+    return CLEARANCE_URL
 
 
-def scrape_deals(url: str, user_agent: str | None, proxy: str | None) -> list[dict[str, str]]:
+def scrape_deals(url: str, user_agent: str | None = None, proxy: str | None = None) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
+    ua = user_agent or (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-
-        context_kwargs: dict[str, object] = {}
-        if user_agent:
-            context_kwargs["user_agent"] = user_agent
+        launch_args: dict[str, object] = {"headless": True}
         if proxy:
-            context_kwargs["proxy"] = {"server": proxy}
+            launch_args["proxy"] = {"server": proxy}
+        browser = playwright.chromium.launch(**launch_args)
 
-        context = browser.new_context(**context_kwargs)
+        context = browser.new_context(
+            user_agent=ua,
+            viewport={"width": 1920, "height": 1080},
+        )
         page = context.new_page()
-        page.goto(url, wait_until="networkidle")
-        page.wait_for_timeout(2000)
+        page.goto(url, wait_until="domcontentloaded")
+        page.wait_for_timeout(5000)
 
         cards = page.locator("[data-testid='product-grid'] [data-testid='product-card']")
         card_count = cards.count()
@@ -55,7 +61,7 @@ def scrape_deals(url: str, user_agent: str | None, proxy: str | None) -> list[di
             url_path = card.locator("a").first.get_attribute("href")
             if not url_path:
                 continue
-            full_url = url_path if url_path.startswith("http") else f"https://www.homedepot.ca{url_path}"
+            full_url = url_path if url_path.startswith("http") else f"{BASE_URL}{url_path}"
             results.append(
                 {
                     "title": title,
@@ -92,7 +98,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    source_url = build_source_url(args.store)
+    source_url = build_url(args.store)
     results = scrape_deals(source_url, args.user_agent, args.proxy)
     penny_deals = filter_penny_deals(results)
 
