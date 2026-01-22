@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import inspect
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -35,7 +36,30 @@ def build_url(store_id: str | None) -> str:
     return CLEARANCE_URL
 
 
-def scrape_deals(url: str, user_agent: str | None = None, proxy: str | None = None) -> list[dict[str, str]]:
+def fetch_with_retries(
+    client: httpx.Client, url: str, retries: int, backoff: float
+) -> httpx.Response:
+    attempt = 0
+    while True:
+        try:
+            response = client.get(url)
+            response.raise_for_status()
+            return response
+        except httpx.TimeoutException:
+            attempt += 1
+            if attempt > retries:
+                raise
+            time.sleep(backoff * attempt)
+
+
+def scrape_deals(
+    url: str,
+    user_agent: str | None = None,
+    proxy: str | None = None,
+    timeout: float = 30.0,
+    retries: int = 2,
+    backoff: float = 2.0,
+) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     ua = user_agent or (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -53,7 +77,7 @@ def scrape_deals(url: str, user_agent: str | None = None, proxy: str | None = No
     client_kwargs: dict[str, object] = {
         "headers": headers,
         "follow_redirects": True,
-        "timeout": 30.0,
+        "timeout": timeout,
     }
     if proxy:
         proxy_config = {"http://": proxy, "https://": proxy}
@@ -63,8 +87,7 @@ def scrape_deals(url: str, user_agent: str | None = None, proxy: str | None = No
         elif "proxy" in client_signature.parameters:
             client_kwargs["proxy"] = proxy
     with httpx.Client(**client_kwargs) as client:
-        response = client.get(url)
-        response.raise_for_status()
+        response = fetch_with_retries(client, url, retries=retries, backoff=backoff)
         selector = Selector(response.text)
 
     cards = selector.css("[data-testid='product-grid'] [data-testid='product-card']")
@@ -108,6 +131,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--store", help="Optional store ID to filter results.")
     parser.add_argument("--user-agent", help="Custom user agent string.")
     parser.add_argument("--proxy", help="Proxy server, e.g. http://proxy:port.")
+    parser.add_argument("--timeout", type=float, default=30.0, help="Request timeout in seconds.")
+    parser.add_argument("--retries", type=int, default=2, help="Retry count on timeouts.")
+    parser.add_argument("--backoff", type=float, default=2.0, help="Backoff multiplier in seconds.")
     parser.add_argument("--output", default=str(OUTPUT_PATH), help="Output JSON path.")
     return parser.parse_args()
 
@@ -115,7 +141,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     source_url = build_url(args.store)
-    results = scrape_deals(source_url, args.user_agent, args.proxy)
+    results = scrape_deals(
+        source_url,
+        args.user_agent,
+        args.proxy,
+        timeout=args.timeout,
+        retries=args.retries,
+        backoff=args.backoff,
+    )
     penny_deals = filter_penny_deals(results)
 
     output_path = Path(args.output)
